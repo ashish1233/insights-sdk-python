@@ -13,6 +13,7 @@ a startup check that no route is unscoped.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -180,13 +181,30 @@ def install(
 
         request.state.principal = principal
         with tenant_context(config.tenant_id, principal):
+            # One record per request, on completion, carrying what an operator
+            # actually asks: which route, how long, what happened. ADR-4's
+            # default view is built from exactly these fields, and a request
+            # log without a duration cannot answer "is it slow", which is the
+            # first question of most incidents.
+            started = time.monotonic()
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                log.error(
+                    "Request failed.",
+                    method=request.method,
+                    path=request.url.path,
+                    duration_ms=round((time.monotonic() - started) * 1000, 1),
+                    error_class=type(exc).__name__,
+                )
+                raise
             log.info(
-                "Request received.",
+                "Request completed.",
                 method=request.method,
                 path=request.url.path,
+                status=response.status_code,
+                duration_ms=round((time.monotonic() - started) * 1000, 1),
             )
-            response = await call_next(request)
-            log.info("Request completed.", status=response.status_code)
             return response
 
     # Added last, so it sits outermost. A CORS preflight is an OPTIONS request

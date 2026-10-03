@@ -143,6 +143,49 @@ def test_cors_preflight_survives_the_auth_gate():
         )
 
 
+def test_requests_are_logged_with_duration_and_status():
+    """ADR-4 promises operators see route, tenant, principal, duration, status.
+
+    A request log without a duration cannot answer "is it slow", which is the
+    first question of most incidents — so the claim has to be backed.
+    """
+    import json
+    import logging
+
+    from insights_platform.telemetry import _JsonFormatter, configure
+
+    captured: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(self.format(record))
+
+    configure()
+    handler = _Capture()
+    handler.setFormatter(_JsonFormatter())
+    logging.getLogger("insights").addHandler(handler)
+    try:
+        token = issue_token(
+            kind=PrincipalKind.USER, subject="alice@corp", tenant_id="finance"
+        )
+        with TestClient(build_app()) as client:
+            client.get("/data", headers={"Authorization": f"Bearer {token}"})
+    finally:
+        logging.getLogger("insights").removeHandler(handler)
+
+    done = [
+        json.loads(line)
+        for line in captured
+        if json.loads(line).get("message") == "Request completed."
+    ]
+    assert done, "expected a completion record"
+    record = done[-1]
+    for field in ("method", "path", "status", "duration_ms", "tenant_id", "principal"):
+        assert field in record, f"operator view needs {field}"
+    assert record["status"] == 200
+    assert isinstance(record["duration_ms"], (int, float))
+
+
 def test_health_is_public_and_reports_the_contract():
     """ADR-4's operator view requires all apps to answer the same shape."""
     with TestClient(build_app()) as client:
